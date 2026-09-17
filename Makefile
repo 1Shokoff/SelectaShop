@@ -33,6 +33,7 @@ COMPOSE := docker compose --env-file $(ENV_FILE) $(COMPOSE_FILES)
 .PHONY: help init-config secret config build up down restart logs ps \
         tls-selfsigned db-cert audit audit-django audit-python audit-deps \
         audit-nginx migrate create-owner grant-role delete-account purge psql mail \
+        backup \
         shell check clean
 
 help:
@@ -62,6 +63,7 @@ help:
 	@echo '    make mail             журнал воркера рассылки (тут ссылки в режиме console)'
 	@echo '    make purge            удалить просроченные регистрации и старые события'
 	@echo '    make psql             консоль psql под ролью приложения'
+	@echo '    make backup           дамп базы в backups/ (ролью только для чтения)'
 	@echo ''
 	@echo '  Безопасность'
 	@echo '    make audit            все проверки разом'
@@ -130,8 +132,10 @@ shell:
 #  Миграции идут ролью-владельцем схемы: у роли приложения нет прав DDL,
 #  и это намеренно.
 
+# Флаг -T отключает выделение терминала: без него команда падает при
+# запуске из cron или другого неинтерактивного окружения.
 migrate: $(ENV_FILE)
-	$(COMPOSE) exec web python manage.py migrate --database=admin
+	$(COMPOSE) exec -T web python manage.py migrate --database=admin
 
 create-owner: $(ENV_FILE)
 	$(COMPOSE) exec web python manage.py create_owner $(ARGS)
@@ -149,7 +153,23 @@ mail:
 	$(COMPOSE) logs -f --tail=200 worker
 
 purge: $(ENV_FILE)
-	$(COMPOSE) exec web python manage.py purge_expired
+	$(COMPOSE) exec -T web python manage.py purge_expired
+
+# Дамп снимается ролью только для чтения — она физически не может
+# ничего изменить в базе.
+#
+# ВНИМАНИЕ: одного дампа НЕДОСТАТОЧНО для восстановления. Адреса почты
+# зашифрованы, и без config/selectashop.toml с ключом шифрования они не
+# читаются. Храните копию конфигурации отдельно и в защищённом месте.
+backup: $(ENV_FILE)
+	@mkdir -p backups
+	@$(COMPOSE) exec -T db pg_dump -h /var/run/postgresql \
+	    -U "$$(grep '^DB_BACKUP_USER=' $(ENV_FILE) | cut -d= -f2-)" \
+	    "$$(grep '^DB_NAME=' $(ENV_FILE) | cut -d= -f2-)" \
+	    | gzip > "backups/db-$$(date +%F-%H%M).sql.gz"
+	@ls -lh backups/ | tail -1
+	@echo '  НЕ ЗАБУДЬТЕ отдельно сохранить config/selectashop.toml —'
+	@echo '  без ключа шифрования адреса почты из дампа не прочитать.'
 
 psql: $(ENV_FILE)
 	@$(COMPOSE) exec db psql \
