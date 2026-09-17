@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — SelectaShop{% endblock %}
+{% block content %}
+    <h1 class="title">{{ title }}</h1>
+    <p class="lead">{{ message }}</p>
+    <p class="note">
+        <a href="{% url 'accounts:register' %}">Регистрация</a>
+        &nbsp;·&nbsp;
+        <a href="{% url 'accounts:password_reset' %}">Восстановление доступа</a>
+    </p>
+{% endblock %}

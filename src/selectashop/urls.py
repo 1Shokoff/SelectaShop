@@ -12,6 +12,11 @@ urlpatterns = [
     path("", include("core.urls")),
 ]
 
+# Маршруты учётных записей появляются только вместе с базой данных:
+# без неё регистрировать и хранить некого.
+if settings.DB_AVAILABLE:
+    urlpatterns.append(path("accounts/", include("accounts.urls")))
+
 if settings.ADMIN_ENABLED:
     from django.contrib import admin
 

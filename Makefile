@@ -32,7 +32,7 @@ COMPOSE := docker compose --env-file $(ENV_FILE) $(COMPOSE_FILES)
 
 .PHONY: help init-config secret config build up down restart logs ps \
         tls-selfsigned db-cert audit audit-django audit-python audit-deps \
-        audit-nginx migrate create-owner grant-role purge psql \
+        audit-nginx migrate create-owner grant-role delete-account purge psql mail \
         shell check clean
 
 help:
@@ -58,6 +58,8 @@ help:
 	@echo '    make migrate          применить миграции (ролью-владельцем)'
 	@echo '    make create-owner     создать владельца магазина'
 	@echo '    make grant-role       сменить роль: ARGS="логин admin"'
+	@echo '    make delete-account   удалить: ARGS="логин" или ARGS="логин --hard"'
+	@echo '    make mail             журнал воркера рассылки (тут ссылки в режиме console)'
 	@echo '    make purge            удалить просроченные регистрации и старые события'
 	@echo '    make psql             консоль psql под ролью приложения'
 	@echo ''
@@ -136,6 +138,15 @@ create-owner: $(ENV_FILE)
 
 grant-role: $(ENV_FILE)
 	$(COMPOSE) exec web python manage.py grant_role $(ARGS)
+
+# Обезличивание по умолчанию, полное удаление — с флагом --hard.
+delete-account: $(ENV_FILE)
+	$(COMPOSE) exec web python manage.py delete_account $(ARGS)
+
+# В режиме [email].backend = "console" письма печатаются сюда целиком,
+# вместе со ссылкой подтверждения.
+mail:
+	$(COMPOSE) logs -f --tail=200 worker
 
 purge: $(ENV_FILE)
 	$(COMPOSE) exec web python manage.py purge_expired

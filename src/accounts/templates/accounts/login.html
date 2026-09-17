@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Вход — SelectaShop{% endblock %}
+{% block content %}
+    <h1 class="title">Вход</h1>
+    <form method="post" novalidate>
+        {% csrf_token %}
+        {% include "accounts/_form.html" %}
+        <button type="submit" class="button">Войти</button>
+    </form>
+    <p class="note">
+        <a href="{% url 'accounts:password_reset' %}">Забыли пароль?</a>
+        &nbsp;·&nbsp;
+        <a href="{% url 'accounts:register' %}">Регистрация</a>
+    </p>
+{% endblock %}

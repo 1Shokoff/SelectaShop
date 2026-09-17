@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Подтверждение адреса — SelectaShop{% endblock %}
+{% block content %}
+    <h1 class="title">Подтвердите адрес почты</h1>
+    <p class="lead">Нажмите кнопку, чтобы завершить регистрацию.</p>
+    <form method="post" novalidate>
+        {% csrf_token %}
+        <button type="submit" class="button">Подтвердить</button>
+    </form>
+    <p class="note">
+        Кнопка нужна не для красоты: почтовые антивирусы открывают ссылки из
+        писем сами, проверяя их. Подтверждение нажатием защищает ссылку от
+        такого срабатывания.
+    </p>
+{% endblock %}

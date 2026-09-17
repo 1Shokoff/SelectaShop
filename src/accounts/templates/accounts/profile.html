@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Личный кабинет — SelectaShop{% endblock %}
+{% block content %}
+    <h1 class="title">Личный кабинет</h1>
+    <dl class="details">
+        <dt>Логин</dt><dd>{{ account.username }}</dd>
+        <dt>Адрес почты</dt><dd>{{ email_address|default:"—" }}</dd>
+        <dt>Роль</dt><dd>{{ account.get_role_display }}</dd>
+        <dt>Состояние</dt><dd>{{ account.get_status_display }}</dd>
+        <dt>Регистрация</dt><dd>{{ account.created_at|date:"d.m.Y H:i" }}</dd>
+        <dt>Последний вход</dt><dd>{{ account.last_login|date:"d.m.Y H:i"|default:"—" }}</dd>
+    </dl>
+    <form method="post" action="{% url 'accounts:logout' %}">
+        {% csrf_token %}
+        <button type="submit" class="button button-secondary">Выйти</button>
+    </form>
+{% endblock %}

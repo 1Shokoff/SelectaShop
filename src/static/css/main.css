@@ -48,3 +48,143 @@ body {
     color: var(--muted);
     font-size: 0.9375rem;
 }
+
+/* --------------------------------------------------------------------------
+   Шапка
+   -------------------------------------------------------------------------- */
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    max-width: 44rem;
+    margin: 0 auto;
+    padding: 1rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+.brand {
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--fg);
+    text-decoration: none;
+}
+
+.nav {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    font-size: 0.9375rem;
+}
+
+.nav a { color: var(--accent); }
+.nav-form { display: inline; margin: 0; }
+
+.link-button {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.shell { padding-top: 2.5rem; }
+
+/* --------------------------------------------------------------------------
+   Формы
+   -------------------------------------------------------------------------- */
+.field { margin-bottom: 1.25rem; }
+
+.field label {
+    display: block;
+    margin-bottom: 0.35rem;
+    font-weight: 500;
+}
+
+.field .required { color: #d33; margin-left: 0.15rem; }
+
+.field input[type="text"],
+.field input[type="email"],
+.field input[type="password"] {
+    width: 100%;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+}
+
+.field input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.field input[type="checkbox"] { margin-right: 0.45rem; }
+
+.field-invalid input { border-color: #d33; }
+
+.hint {
+    margin: 0.35rem 0 0;
+    color: var(--muted);
+    font-size: 0.875rem;
+}
+
+.error {
+    margin: 0.35rem 0 0;
+    color: #d33;
+    font-size: 0.875rem;
+}
+
+.alert {
+    margin-bottom: 1.25rem;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    font-size: 0.9375rem;
+}
+
+.alert-error {
+    border: 1px solid #d33;
+    color: #d33;
+}
+
+.alert p { margin: 0; }
+
+.button {
+    display: inline-block;
+    padding: 0.6rem 1.3rem;
+    border: 0;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+}
+
+.button-secondary {
+    background: none;
+    border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+    color: var(--fg);
+}
+
+/* --------------------------------------------------------------------------
+   Личный кабинет
+   -------------------------------------------------------------------------- */
+.details {
+    display: grid;
+    grid-template-columns: minmax(8rem, auto) 1fr;
+    gap: 0.5rem 1.5rem;
+    margin: 0 0 2rem;
+}
+
+.details dt { color: var(--muted); }
+.details dd { margin: 0; }
+
+@media (max-width: 30rem) {
+    .details { grid-template-columns: 1fr; gap: 0.15rem; }
+    .details dd { margin-bottom: 0.75rem; }
+}

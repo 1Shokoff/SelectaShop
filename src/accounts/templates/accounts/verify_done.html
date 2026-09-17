@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Адрес подтверждён — SelectaShop{% endblock %}
+{% block content %}
+    <h1 class="title">Адрес подтверждён</h1>
+    <p class="lead">Учётная запись активна. Теперь можно войти.</p>
+    <p><a class="button" href="{% url 'accounts:login' %}">Войти</a></p>
+{% endblock %}

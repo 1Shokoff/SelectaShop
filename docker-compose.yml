@@ -173,6 +173,49 @@ services:
       retries: 5
 
   # ---------------------------------------------------------------------------
+  #  Воркер рассылки
+  # ---------------------------------------------------------------------------
+  worker:
+    <<: *hardening
+
+    # Тот же образ, что и web. Отличается только команда запуска: собирать
+    # и обновлять второй образ ради одного процесса незачем.
+    image: ${COMPOSE_PROJECT_NAME}-web:latest
+    command: ["worker"]
+
+    # ЕДИНСТВЕННЫЙ контейнер проекта с выходом в интернет. Контейнер web
+    # остаётся полностью изолированным — это прямое следствие того, что
+    # очередь лежит в базе, а не во внешнем брокере.
+    #
+    # Оборотная сторона, которую стоит держать в голове: здесь сходятся
+    # вместе ключ шифрования (нужен, чтобы прочитать адрес получателя) и
+    # доступ наружу. Компрометация этого контейнера опаснее, чем web.
+    # Смягчается тем, что он не слушает ни одного порта вообще.
+    networks:
+      - data
+      - egress
+
+    volumes:
+      - ./config/selectashop.toml:/etc/selectashop/selectashop.toml:ro
+      - ./deploy/generated/certs/db/server.crt:/etc/postgresql/certs/server.crt:ro
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${TMPFS_SIZE}
+
+    mem_limit: ${WORKER_MEMORY}
+    cpus: ${WORKER_CPUS}
+    pids_limit: ${WORKER_PIDS}
+
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 2048
+
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
   #  Веб-сервер
   # ---------------------------------------------------------------------------
   nginx:
@@ -260,6 +303,15 @@ networks:
     ipam:
       config:
         - subnet: ${DATA_SUBNET}
+
+  # Единственная сеть без пометки internal. В ней находится только воркер
+  # рассылки: ему нужно достучаться до SMTP-релея. Ни web, ни db, ни nginx
+  # к ней не подключены.
+  egress:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${EGRESS_SUBNET}
 
 volumes:
   static_data:

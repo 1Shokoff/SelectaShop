@@ -99,15 +99,36 @@ def validate(cfg: dict) -> list[str]:
 
     tls_on = get(cfg, "tls", "enabled", False)
     if not tls_on:
+        # Наличие базы данных означает наличие учётных записей, а значит
+        # и форм входа. Пароль по незашифрованному каналу виден любому
+        # узлу на маршруте, поэтому это ошибка, а не предупреждение.
+        if get(cfg, "database", "engine", "none") != "none":
+            raise ConfigError(
+                "[tls].enabled = false при настроенной базе данных.\n"
+                "  На сайте есть формы входа и регистрации: без шифрования\n"
+                "  канала пароли пойдут по сети открытым текстом.\n\n"
+                "  Создайте сертификат (домен для этого не нужен):\n"
+                "      make tls-selfsigned\n"
+                "  затем установите [tls].enabled = true"
+            )
+
         warnings.append(
-            "TLS выключен. Трафик идёт открытым текстом. Это допустимо, пока "
-            "на сайте нет форм входа, но ОБЯЗАТЕЛЬНО к включению до этапа 1."
+            "TLS выключен. Трафик идёт открытым текстом. Допустимо только "
+            "пока на сайте нет ни одной формы."
         )
         if get(cfg, "django", "admin_enabled", False):
             raise ConfigError(
                 "[django].admin_enabled = true при выключенном TLS. "
                 "Пароль администратора ушёл бы по сети открытым текстом. "
                 "Включите [tls].enabled или выключите админку."
+            )
+
+    if tls_on:
+        cert = ROOT / "deploy" / "generated" / "certs" / "server.crt"
+        if not cert.exists():
+            raise ConfigError(
+                "[tls].enabled = true, но сертификат сайта не создан.\n"
+                "  выполните:  make tls-selfsigned"
             )
     if tls_on and get(cfg, "tls", "hsts_seconds", 0) > 0:
         warnings.append(
@@ -175,7 +196,7 @@ def validate(cfg: dict) -> list[str]:
                 "[database].tls_enabled = false — канал до БД не шифруется."
             )
 
-    for name in ("edge_subnet", "internal_subnet", "data_subnet"):
+    for name in ("edge_subnet", "internal_subnet", "data_subnet", "egress_subnet"):
         value = get(cfg, "network", name)
         try:
             ipaddress.ip_network(value)
@@ -415,7 +436,12 @@ def build_nginx_values(cfg: dict) -> dict[str, str]:
         "static_cache_max_age": ng["static_cache_max_age"],
         # Логи идут в stdout/stderr: контейнер работает с read-only
         # файловой системой, и логи забирает docker, а не файл на диске.
-        "access_log_state": "/dev/stdout main" if ng.get("access_log_enabled", True) else "off",
+        # Условие if=$loggable исключает адреса с одноразовыми токенами.
+        "access_log_directive": (
+            "access_log /dev/stdout main if=$loggable;"
+            if ng.get("access_log_enabled", True)
+            else "access_log off;"
+        ),
         "healthcheck_access_log": log_health,
         "server_ip": net["server_ip"],
         "method_guard": build_method_guard(cfg, indent="    "),
@@ -482,6 +508,10 @@ def build_env(cfg: dict) -> str:
         "NGINX_CPUS": lim["nginx_cpus"],
         "NGINX_PIDS": lim["nginx_pids"],
         "TMPFS_SIZE": lim["tmpfs_size"],
+        "EGRESS_SUBNET": net["egress_subnet"],
+        "WORKER_MEMORY": lim.get("worker_memory", "160m"),
+        "WORKER_CPUS": lim.get("worker_cpus", "0.25"),
+        "WORKER_PIDS": lim.get("worker_pids", 64),
         "TLS_ENABLED": str(cfg["tls"].get("enabled", False)).lower(),
     }
 

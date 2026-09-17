@@ -334,6 +334,7 @@ WSGI_APPLICATION = "selectashop.wsgi.application"
 
 _context_processors = [
     "django.template.context_processors.request",
+    "core.context_processors.site",
 ]
 if DB_AVAILABLE:
     _context_processors += [
@@ -443,11 +444,17 @@ LOGGING = {
             "style": "{",
         }
     },
+    "filters": {
+        # Одноразовые токены из ссылок в письмах не должны попадать в
+        # журнал: Django пишет путь запроса при каждом ответе 4xx и 5xx.
+        "redact_tokens": {"()": "selectashop.log_filters.RedactTokens"},
+    },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
             "stream": sys.stdout,
             "formatter": "standard",
+            "filters": ["redact_tokens"],
         }
     },
     "root": {"handlers": ["console"], "level": LOG_LEVEL},
@@ -562,3 +569,80 @@ LEGAL_DOCUMENTS = {
         "title": "Пользовательское соглашение",
     },
 }
+
+
+# =============================================================================
+#  Публичный адрес сайта
+# =============================================================================
+#  Нужен для ссылок в письмах. Заголовок Host для этого не годится:
+#  письмо формирует воркер, у которого нет входящего запроса, а доверять
+#  Host из запроса при построении ссылок — это host header injection.
+
+_public_base = str(_net.get("public_base_url", "")).rstrip("/")
+
+if _public_base:
+    PUBLIC_BASE_URL = _public_base
+else:
+    _scheme = "https" if TLS_ENABLED else "http"
+    _port = int(_net.get("https_port", 443)) if TLS_ENABLED else int(_net.get("http_port", 80))
+    _default_port = 443 if TLS_ENABLED else 80
+    _host = SERVER_IP if _port == _default_port else f"{SERVER_IP}:{_port}"
+    PUBLIC_BASE_URL = f"{_scheme}://{_host}"
+
+
+# =============================================================================
+#  Отправка писем
+# =============================================================================
+
+_email = CONFIG.get("email", {})
+_smtp = _email.get("smtp", {})
+
+EMAIL = {
+    "backend": str(_email.get("backend", "console")).lower(),
+    "from_address": _email.get("from_address", ""),
+    "from_name": _email.get("from_name", "SelectaShop"),
+    "reply_to": _email.get("reply_to", "") or _email.get("from_address", ""),
+    "smtp": {
+        "host": _smtp.get("host", ""),
+        "port": int(_smtp.get("port", 465)),
+        "user": _smtp.get("user", ""),
+        "password": _smtp.get("password", ""),
+        "security": str(_smtp.get("security", "ssl")).lower(),
+        "timeout": int(_smtp.get("timeout", 20)),
+    },
+}
+
+if EMAIL["backend"] not in {"console", "smtp"}:
+    raise ImproperlyConfigured(
+        f"[email].backend = {EMAIL['backend']!r}; ожидается console|smtp"
+    )
+
+if EMAIL["backend"] == "smtp":
+    if not EMAIL["smtp"]["host"] or not EMAIL["smtp"]["user"]:
+        raise ImproperlyConfigured(
+            "[email].backend = smtp, но [email.smtp].host или .user не заданы"
+        )
+    if EMAIL["smtp"]["security"] not in {"ssl", "tls"}:
+        raise ImproperlyConfigured(
+            "[email.smtp].security: ожидается ssl (порт 465) или tls (STARTTLS, порт 587)"
+        )
+
+_worker = CONFIG.get("worker", {})
+
+WORKER = {
+    "poll_interval_seconds": int(_worker.get("poll_interval_seconds", 3)),
+    "batch_size": int(_worker.get("batch_size", 10)),
+    "retry_base_seconds": int(_worker.get("retry_base_seconds", 60)),
+    "retry_max_seconds": int(_worker.get("retry_max_seconds", 3600)),
+    "shutdown_grace_seconds": int(_worker.get("shutdown_grace_seconds", 20)),
+    "stale_lock_seconds": int(_worker.get("stale_lock_seconds", 300)),
+}
+
+
+# =============================================================================
+#  Маршруты аутентификации
+# =============================================================================
+
+LOGIN_URL = "/accounts/login/"
+LOGIN_REDIRECT_URL = "/accounts/profile/"
+LOGOUT_REDIRECT_URL = "/"

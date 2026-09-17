@@ -10,6 +10,24 @@
     <link rel="stylesheet" href="{% static 'css/main.css' %}">
 </head>
 <body>
+    <header class="topbar">
+        <a class="brand" href="/">SelectaShop</a>
+        {% if accounts_enabled %}
+            <nav class="nav">
+                {% if user.is_authenticated %}
+                    <a href="{% url 'accounts:profile' %}">{{ user.username }}</a>
+                    <form method="post" action="{% url 'accounts:logout' %}" class="nav-form">
+                        {% csrf_token %}
+                        <button type="submit" class="link-button">Выйти</button>
+                    </form>
+                {% else %}
+                    <a href="{% url 'accounts:login' %}">Вход</a>
+                    <a href="{% url 'accounts:register' %}">Регистрация</a>
+                {% endif %}
+            </nav>
+        {% endif %}
+    </header>
+
     <main class="shell">
         {% block content %}{% endblock %}
     </main>
