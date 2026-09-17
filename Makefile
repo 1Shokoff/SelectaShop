@@ -1,0 +1,151 @@
+# =============================================================================
+#  SelectaShop
+# =============================================================================
+#  Обычный порядок первого запуска:
+#
+#      make init-config          создать config/selectashop.toml
+#      $EDITOR config/selectashop.toml    вписать [network].server_ip
+#      make config               сгенерировать конфиги nginx и compose
+#      make build && make up
+#
+#  После ЛЮБОЙ правки config/selectashop.toml:  make config && make restart
+# =============================================================================
+
+.DEFAULT_GOAL := help
+SHELL := /bin/sh
+
+ENV_FILE   := deploy/generated/.env
+BASE_FILE  := docker-compose.yml
+TLS_FILE   := deploy/generated/docker-compose.tls.yml
+EGR_FILE   := deploy/generated/docker-compose.egress.yml
+
+# Оверлеи подключаются, только если их сгенерировал render_config.py.
+COMPOSE_FILES := -f $(BASE_FILE)
+ifneq ($(wildcard $(TLS_FILE)),)
+COMPOSE_FILES += -f $(TLS_FILE)
+endif
+ifneq ($(wildcard $(EGR_FILE)),)
+COMPOSE_FILES += -f $(EGR_FILE)
+endif
+
+COMPOSE := docker compose --env-file $(ENV_FILE) $(COMPOSE_FILES)
+
+.PHONY: help init-config secret config build up down restart logs ps \
+        tls-selfsigned audit audit-django audit-python audit-deps audit-nginx \
+        shell check clean
+
+help:
+	@echo ''
+	@echo '  SelectaShop — доступные команды'
+	@echo ''
+	@echo '  Настройка'
+	@echo '    make init-config      создать config/selectashop.toml из шаблона'
+	@echo '    make secret           напечатать новый SECRET_KEY'
+	@echo '    make config           сгенерировать конфиги из единого файла'
+	@echo '    make tls-selfsigned   самоподписанный сертификат для работы по IP'
+	@echo ''
+	@echo '  Запуск'
+	@echo '    make build            собрать образ приложения'
+	@echo '    make up               поднять сервисы'
+	@echo '    make down             остановить сервисы'
+	@echo '    make restart          перезапустить оба сервиса вместе'
+	@echo '    make logs             смотреть логи'
+	@echo '    make ps               состояние контейнеров'
+	@echo ''
+	@echo '  Безопасность'
+	@echo '    make audit            все проверки разом'
+	@echo '    make audit-django     django check --deploy'
+	@echo '    make audit-python     статический анализ кода (bandit)'
+	@echo '    make audit-deps       уязвимости в зависимостях (pip-audit)'
+	@echo '    make audit-nginx      проверка конфига nginx (nginx -t, gixy)'
+	@echo ''
+
+# -----------------------------------------------------------------------------
+#  Настройка
+# -----------------------------------------------------------------------------
+
+init-config:
+	@python3 scripts/init_config.py
+
+secret:
+	@python3 -c "import secrets,string; a=string.ascii_letters+string.digits+'!#\$$%&()*+,-./:;<=>?@[]^_{|}~'; print(''.join(secrets.choice(a) for _ in range(64)))"
+
+config:
+	@python3 scripts/render_config.py
+
+tls-selfsigned:
+	@sh scripts/gen_selfsigned_cert.sh
+
+# -----------------------------------------------------------------------------
+#  Запуск
+# -----------------------------------------------------------------------------
+#  Каждая цель зависит от $(ENV_FILE): забыть `make config` после правки
+#  конфига невозможно по построению.
+
+$(ENV_FILE):
+	@python3 scripts/render_config.py
+
+build: $(ENV_FILE)
+	$(COMPOSE) build
+
+up: $(ENV_FILE)
+	$(COMPOSE) up -d
+	@echo ''
+	@$(COMPOSE) ps
+
+down:
+	$(COMPOSE) down
+
+# Оба сервиса перезапускаются вместе: nginx кеширует IP апстрима с момента
+# старта, и перезапуск одного лишь web оставил бы его стучать в пустоту.
+restart: $(ENV_FILE)
+	$(COMPOSE) up -d --force-recreate
+
+logs:
+	$(COMPOSE) logs -f --tail=100
+
+ps:
+	$(COMPOSE) ps
+
+shell:
+	$(COMPOSE) exec web /bin/sh
+
+# -----------------------------------------------------------------------------
+#  Аудит безопасности
+# -----------------------------------------------------------------------------
+
+audit: audit-django audit-python audit-deps audit-nginx
+	@echo ''
+	@echo '  Аудит завершён.'
+
+audit-django: $(ENV_FILE)
+	@echo ''
+	@echo '=== Django: проверка настроек развёртывания ==============='
+	@$(COMPOSE) run --rm --no-deps web python manage.py check --deploy
+
+audit-python:
+	@echo ''
+	@echo '=== bandit: статический анализ кода ======================='
+	@bandit -q -r src/ scripts/ -f screen || true
+
+audit-deps:
+	@echo ''
+	@echo '=== pip-audit: уязвимости в зависимостях =================='
+	@pip-audit -r requirements.txt --progress-spinner off || true
+
+audit-nginx: $(ENV_FILE)
+	@echo ''
+	@echo '=== nginx: синтаксис конфигурации ========================='
+	@docker run --rm \
+	    -v "$(CURDIR)/deploy/generated/nginx.conf:/etc/nginx/nginx.conf:ro" \
+	    -v "$(CURDIR)/deploy/generated/snippets:/etc/nginx/snippets:ro" \
+	    $$(grep '^NGINX_IMAGE=' $(ENV_FILE) | cut -d= -f2-) nginx -t
+	@echo ''
+	@echo '=== gixy: анализ конфигурации на уязвимости ==============='
+	@gixy deploy/generated/nginx.conf || true
+
+check: audit
+
+clean:
+	$(COMPOSE) down -v
+	rm -rf deploy/generated

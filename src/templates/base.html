@@ -1,0 +1,17 @@
+{% load static %}<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>{% block title %}SelectaShop{% endblock %}</title>
+    {# Без inline-стилей и inline-скриптов: CSP не содержит 'unsafe-inline', #}
+    {# поэтому всё оформление подключается только внешними файлами.          #}
+    <link rel="stylesheet" href="{% static 'css/main.css' %}">
+</head>
+<body>
+    <main class="shell">
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

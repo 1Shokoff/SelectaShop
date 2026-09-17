@@ -1,0 +1,142 @@
+    # -------------------------------------------------------------------------
+    #  Ограничения на уровне соединения
+    # -------------------------------------------------------------------------
+    limit_conn perip {{ conn_limit_per_ip }};
+    limit_req  zone=general burst={{ rate_limit_general_burst }} nodelay;
+
+{{ method_guard }}
+
+    # Заголовки безопасности. Подключаются через include, а не add_header,
+    # и повторяются в каждом location со своим add_header — иначе nginx
+    # отменит их наследование от server (см. render_config.py).
+    include /etc/nginx/snippets/security_headers.conf;
+
+    # nginx слушает 8080 внутри контейнера, а публикуется на 80/443.
+    # Без этих двух строк собственные редиректы nginx уносили бы клиента
+    # на внутренний порт 8080, которого снаружи не существует.
+    absolute_redirect off;
+    port_in_redirect  off;
+
+    # Каталоги никогда не листингуются.
+    autoindex off;
+
+    # -------------------------------------------------------------------------
+    #  Статика приложения
+    # -------------------------------------------------------------------------
+    #  Отдаётся напрямую nginx, минуя Python. На одном ядре это главный
+    #  источник экономии: каждый запрос за CSS, не дошедший до gunicorn, —
+    #  это освободившийся воркер.
+    location /static/ {
+        alias /var/www/static/;
+
+        include /etc/nginx/snippets/security_headers.conf;
+        add_header Cache-Control "public, max-age=2592000, immutable" always;
+
+        access_log off;
+        autoindex  off;
+
+        # Манифест ManifestStaticFilesStorage: соответствие исходных имён
+        # хешированным. Приложению он нужен только на стороне сервера,
+        # а наружу отдаёт полный перечень файлов проекта.
+        location = /static/staticfiles.json {
+            return 404;
+        }
+
+        # В каталог статики не должно попадать ничего исполняемого,
+        # но если попадёт по ошибке сборки — отдано оно не будет.
+        location ~* \.(py|pyc|pyo|sh|bash|env|toml|ini|cfg|sqlite3?|db|bak|swp)$ {
+            return 404;
+        }
+    }
+
+    # -------------------------------------------------------------------------
+    #  Загруженные файлы
+    # -------------------------------------------------------------------------
+    #  Белый список расширений вместо чёрного. Отдаются только растровые
+    #  изображения. SVG исключён намеренно: это XML, он может содержать
+    #  <script>, и при отдаче с того же origin это хранимая XSS.
+    location ~* ^/media/(?<media_path>[\w./-]+\.(?:jpe?g|png|gif|webp|avif))$ {
+        alias /var/www/media/$media_path;
+
+        include /etc/nginx/snippets/security_headers.conf;
+        add_header Cache-Control "public, max-age=604800" always;
+        # Даже если тип определится неверно, файл не будет отрисован как
+        # документ в контексте нашего origin.
+        add_header X-Content-Type-Options "nosniff" always;
+
+        access_log off;
+        autoindex  off;
+    }
+
+    # Любое другое обращение к /media/ — включая обход каталога и попытки
+    # получить не-картинку — обрывается здесь.
+    location /media/ {
+        return 404;
+    }
+
+    # -------------------------------------------------------------------------
+    #  Заведомо враждебные пути
+    # -------------------------------------------------------------------------
+    #  Точечные файлы: .git, .env, .htpasswd и прочее, что сканеры
+    #  запрашивают в первую очередь.
+    location ~ /\. {
+        access_log off;
+        return 404;
+    }
+
+    # Резервные копии и временные файлы редакторов.
+    location ~* \.(bak|old|orig|save|swp|sql|tar|gz|zip)$ {
+        access_log off;
+        return 404;
+    }
+
+    # -------------------------------------------------------------------------
+    #  Приложение
+    # -------------------------------------------------------------------------
+    location / {
+        proxy_pass http://app;
+
+        # HTTP/1.1 с пустым Connection нужен, чтобы работал keepalive
+        # к апстриму: экономия на установке TCP-соединений.
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+
+        # Host передаётся как пришёл. Чужой Host сюда не попадёт: его
+        # раньше отбросил catch-all сервер, вернув 444.
+        proxy_set_header Host              $host;
+
+        # ВАЖНО: $remote_addr, а НЕ $proxy_add_x_forwarded_for.
+        # Второй вариант дописывает адрес к значению, присланному клиентом,
+        # то есть позволяет подделать источник запроса и обойти любую
+        # логику, опирающуюся на IP (баны, geo, лимиты в приложении).
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-Port  $server_port;
+
+        # Заголовки, которыми приложение не должно управлять снаружи.
+        proxy_set_header X-Forwarded-Server "";
+
+        # Не отдавать наружу служебные заголовки апстрима.
+        proxy_hide_header X-Powered-By;
+        proxy_hide_header Server;
+
+        # Django выставляет часть заголовков безопасности сам. Здесь его
+        # копии убираются, чтобы клиент получил ровно по одному экземпляру
+        # каждого заголовка — источником остаётся nginx.
+        include /etc/nginx/snippets/proxy_hide_security_headers.conf;
+
+        proxy_connect_timeout 5s;
+        proxy_send_timeout    30s;
+        proxy_read_timeout    30s;
+
+        proxy_buffering       on;
+        proxy_buffers         8 8k;
+        proxy_buffer_size     8k;
+        proxy_busy_buffers_size 16k;
+
+        # Не перехватывать ошибки приложения: Django сам отдаёт свои
+        # страницы 404/500 и лучше знает контекст.
+        proxy_intercept_errors off;
+    }

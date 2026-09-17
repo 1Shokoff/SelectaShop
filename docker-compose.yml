@@ -1,0 +1,157 @@
+# =============================================================================
+#  SelectaShop — этап 0: nginx + Django
+# =============================================================================
+#  Переменные берутся из deploy/generated/.env, который порождается из
+#  config/selectashop.toml. Запускать через make, а не напрямую:
+#  compose нужно передать --env-file, иначе переменные не подставятся.
+#
+#  Оверлеи, подключаемые автоматически (см. Makefile):
+#    deploy/generated/docker-compose.tls.yml     при [tls].enabled
+#    deploy/generated/docker-compose.egress.yml  при [network].web_egress
+# =============================================================================
+
+# Общие настройки безопасности контейнеров.
+x-hardening: &hardening
+  # Процесс не может получить привилегии больше стартовых, даже через
+  # setuid-бинарники. Отсекает целый класс приёмов повышения прав.
+  security_opt:
+    - no-new-privileges:true
+  # Ни одной linux-capability. Оба сервиса слушают порты выше 1024
+  # и работают от непривилегированного пользователя, так что не нужны.
+  cap_drop:
+    - ALL
+  # Корневая файловая система только для чтения. Даже при выполнении
+  # произвольного кода атакующему некуда положить полезную нагрузку:
+  # записываемы только явно перечисленные tmpfs и тома.
+  read_only: true
+  restart: unless-stopped
+  # Ограничение логов. На VPS с маленьким диском неограниченный json-лог
+  # переполняет раздел и роняет всё разом.
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  # ---------------------------------------------------------------------------
+  #  Приложение
+  # ---------------------------------------------------------------------------
+  web:
+    <<: *hardening
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE}
+    image: ${COMPOSE_PROJECT_NAME}-web:latest
+
+    # Портов наружу нет вовсе. Приложение достижимо только из сети
+    # internal, то есть только через nginx.
+    expose:
+      - "8000"
+
+    networks:
+      - internal
+
+    volumes:
+      # Единственный источник конфигурации, только для чтения.
+      - ./config/selectashop.toml:/etc/selectashop/selectashop.toml:ro
+      - static_data:/var/www/static
+      - media_data:/var/www/media
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${TMPFS_SIZE}
+
+    mem_limit: ${WEB_MEMORY}
+    cpus: ${WEB_CPUS}
+    pids_limit: ${WEB_PIDS}
+
+    ulimits:
+      nofile:
+        soft: 2048
+        hard: 4096
+
+  # ---------------------------------------------------------------------------
+  #  Веб-сервер
+  # ---------------------------------------------------------------------------
+  nginx:
+    <<: *hardening
+    image: ${NGINX_IMAGE}
+
+    # Образ nginx-unprivileged работает от uid 101 и слушает порт 8080.
+    # Обычный образ nginx запускает мастер-процесс от root — здесь это
+    # не нужно и не используется.
+    ports:
+      - "${BIND_ADDRESS}:${HTTP_PORT}:8080"
+
+    networks:
+      - edge
+      - internal
+
+    volumes:
+      - ./deploy/generated/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/generated/snippets:/etc/nginx/snippets:ro
+      # Статика и загруженные файлы — строго только для чтения.
+      # Веб-сервер не имеет причин что-либо в них записывать.
+      - static_data:/var/www/static:ro
+      - media_data:/var/www/media:ro
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${TMPFS_SIZE}
+
+    mem_limit: ${NGINX_MEMORY}
+    cpus: ${NGINX_CPUS}
+    pids_limit: ${NGINX_PIDS}
+
+    ulimits:
+      nofile:
+        soft: 2048
+        hard: 4096
+
+    healthcheck:
+      # Отдельный сервер на 127.0.0.1:8081 внутри контейнера.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8081/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+    # service_started, а не service_healthy: nginx должен подняться и
+    # отдавать 502, даже если приложение сейчас нездорово. Иначе сбой
+    # в Django означал бы полное отсутствие ответа от сервера.
+    #
+    # ВАЖНО: nginx резолвит имя web один раз при старте. Если пересоздать
+    # только контейнер web, он получит новый IP, а nginx продолжит стучать
+    # по старому. Поэтому перезапускать сервисы следует вместе:
+    # `make restart`, а не `docker compose restart web`.
+    depends_on:
+      web:
+        condition: service_started
+
+networks:
+  # Внешняя сеть: только nginx. Через неё приходит трафик с хоста.
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${EDGE_SUBNET}
+
+  # Внутренняя сеть: nginx <-> web.
+  # internal: true означает, что docker не создаёт маршрут наружу.
+  # Контейнер web не может инициировать соединение в интернет вообще —
+  # это резко ограничивает ущерб от возможного RCE: ни выгрузить данные,
+  # ни скачать вторую стадию нагрузки.
+  # Снимается через [network].web_egress = true, когда понадобятся
+  # платёжные API и SMTP.
+  internal:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${INTERNAL_SUBNET}
+
+volumes:
+  static_data:
+  media_data:

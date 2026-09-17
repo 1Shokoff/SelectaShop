@@ -1,0 +1,26 @@
+# Всё, что не нужно в контексте сборки. Чем меньше контекст, тем меньше
+# шансов случайно запечь секрет в слой образа.
+.git
+.gitignore
+.github
+
+# КРИТИЧНО: рабочий конфиг содержит SECRET_KEY и пароль БД.
+# В образ он не попадает никогда — только монтируется при запуске.
+config/selectashop.toml
+deploy/generated/
+
+docs/
+*.md
+Makefile
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.log
+*.sqlite3
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
