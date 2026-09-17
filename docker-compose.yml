@@ -54,10 +54,14 @@ services:
 
     networks:
       - internal
+      - data
 
     volumes:
       # Единственный источник конфигурации, только для чтения.
       - ./config/selectashop.toml:/etc/selectashop/selectashop.toml:ro
+      # Корневой сертификат БД. Нужен для режима verify-full: без него
+      # приложение не смогло бы отличить настоящий сервер от подставного.
+      - ./deploy/generated/certs/db/server.crt:/etc/postgresql/certs/server.crt:ro
       - static_data:/var/www/static
       - media_data:/var/www/media
 
@@ -72,6 +76,101 @@ services:
       nofile:
         soft: 2048
         hard: 4096
+
+    # Миграции выполняются в entrypoint, поэтому база должна быть готова
+    # принимать соединения, а не просто запущена.
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  #  База данных
+  # ---------------------------------------------------------------------------
+  db:
+    <<: *hardening
+    image: ${POSTGRES_IMAGE}
+
+    # Контейнер работает от пользователя postgres с самого начала, а не
+    # стартует от root и понижает права. Это обязательно, потому что
+    # cap_drop: ALL отбирает CAP_SETUID и CAP_CHOWN — понизить права
+    # процесс уже не смог бы. Образ рассчитан на такой запуск.
+    user: "999:999"
+
+    # Порт наружу не публикуется вовсе. База достижима только из сети
+    # data, где находятся приложение и будущий воркер рассылки.
+    expose:
+      - "5432"
+
+    networks:
+      - data
+
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_SUPERUSER}
+      POSTGRES_PASSWORD: ${DB_SUPERUSER_PASSWORD}
+      # Пароли ролей читает скрипт первичной инициализации.
+      DB_OWNER_USER: ${DB_OWNER_USER}
+      DB_OWNER_PASSWORD: ${DB_OWNER_PASSWORD}
+      DB_APP_USER: ${DB_APP_USER}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD}
+      DB_BACKUP_USER: ${DB_BACKUP_USER}
+      DB_BACKUP_PASSWORD: ${DB_BACKUP_PASSWORD}
+
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Скрипт создания ролей. Выполняется один раз, при первом запуске.
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./deploy/generated/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./deploy/generated/certs/db:/etc/postgresql/certs:ro
+
+    command:
+      - postgres
+      # Свои правила доступа вместо тех, что создаёт initdb.
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      # Шифрование канала до приложения.
+      - -c
+      - ssl=${PG_SSL}
+      - -c
+      - ssl_cert_file=/etc/postgresql/certs/server.crt
+      - -c
+      - ssl_key_file=/etc/postgresql/certs/server.key
+      # Параметры под 1 ГБ RAM.
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE}
+      - -c
+      - work_mem=${PG_WORK_MEM}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM}
+      - -c
+      - wal_buffers=${PG_WAL_BUFFERS}
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS}
+      - -c
+      - checkpoint_completion_target=${PG_CHECKPOINT_COMPLETION_TARGET}
+      - -c
+      - random_page_cost=${PG_RANDOM_PAGE_COST}
+      - -c
+      - log_min_duration_statement=${PG_LOG_MIN_DURATION}
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${TMPFS_SIZE}
+      # Каталог сокета. Корневая ФС смонтирована только для чтения,
+      # а сокет создавать где-то надо.
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=8m,mode=1777
+
+    mem_limit: ${DB_MEMORY}
+    cpus: ${DB_CPUS}
+    pids_limit: ${DB_PIDS}
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -h /var/run/postgresql"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
 
   # ---------------------------------------------------------------------------
   #  Веб-сервер
@@ -152,6 +251,17 @@ networks:
       config:
         - subnet: ${INTERNAL_SUBNET}
 
+  # Сеть данных: приложение <-> база. Отдельно от internal намеренно —
+  # у nginx нет и не должно быть доступа к базе данных. Тоже изолирована
+  # от интернета.
+  data:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${DATA_SUBNET}
+
 volumes:
   static_data:
   media_data:
+  pgdata:

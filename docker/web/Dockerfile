@@ -69,6 +69,11 @@ COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 COPY --chown=root:root src/ /app/
+
+# Юридические документы. Лежат в образе, а не в томе: их версия должна
+# быть жёстко связана с версией кода, иначе записанный в базе хеш
+# согласия перестанет сходиться с текстом.
+COPY --chown=root:root legal/ /app/legal/
 COPY --chown=root:root docker/web/gunicorn.conf.py /etc/gunicorn/gunicorn.conf.py
 COPY --chown=root:root docker/web/entrypoint.sh /usr/local/bin/entrypoint.sh
 

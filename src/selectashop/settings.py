@@ -192,6 +192,35 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = bool(_sec.get("session_expire_at_browser_close
 #  для сайта-заглушки.
 
 DB_ENGINE = _db.get("engine", "none")
+DB_TLS = bool(_db.get("tls_enabled", False))
+
+
+def _postgres(user_key: str, password_key: str) -> dict:
+    """Параметры подключения для одной из ролей БД."""
+    options: dict = {}
+    if DB_TLS:
+        # verify-full проверяет и цепочку сертификата, и совпадение имени
+        # хоста. Более слабые режимы (require, prefer) шифруют канал, но
+        # не защищают от подмены сервера, то есть не дают главного.
+        options["sslmode"] = _db.get("ssl_mode", "verify-full")
+        root_cert = _db.get("ssl_root_cert", "")
+        if root_cert:
+            options["sslrootcert"] = root_cert
+    else:
+        options["sslmode"] = "disable"
+
+    return {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": _db.get("name", "selectashop"),
+        "USER": _db.get(user_key, ""),
+        "PASSWORD": _db.get(password_key, ""),
+        "HOST": _db.get("host", "db"),
+        "PORT": int(_db.get("port", 5432)),
+        "CONN_MAX_AGE": int(_db.get("conn_max_age", 60)),
+        "CONN_HEALTH_CHECKS": True,
+        "OPTIONS": options,
+    }
+
 
 if DB_ENGINE == "none":
     DATABASES = {}
@@ -203,17 +232,19 @@ elif DB_ENGINE == "sqlite":
         }
     }
 elif DB_ENGINE == "postgresql":
+    # Две роли, два подключения.
+    #
+    #   default — роль приложения. Имеет только SELECT/INSERT/UPDATE/DELETE.
+    #             Через неё идут все запросы в обычной работе.
+    #   admin   — владелец схемы, права DDL. Используется ИСКЛЮЧИТЕЛЬНО
+    #             миграциями: `manage.py migrate --database=admin`.
+    #
+    # Смысл разделения прямой: успешная SQL-инъекция в приложении не сможет
+    # выполнить DROP TABLE, CREATE FUNCTION или прочитать pg_authid —
+    # у роли приложения таких прав просто нет.
     DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": _db.get("name", "selectashop"),
-            "USER": _db.get("user", "selectashop"),
-            "PASSWORD": _db.get("password", ""),
-            "HOST": _db.get("host", "db"),
-            "PORT": int(_db.get("port", 5432)),
-            "CONN_MAX_AGE": int(_db.get("conn_max_age", 60)),
-            "OPTIONS": {"sslmode": _db.get("ssl_mode", "prefer")},
-        }
+        "default": _postgres("app_user", "app_password"),
+        "admin": _postgres("owner_user", "owner_password"),
     }
 else:
     raise ImproperlyConfigured(
@@ -273,7 +304,18 @@ if DB_AVAILABLE:
         "django.contrib.sessions",
         "django.contrib.messages",
         *INSTALLED_APPS,
+        "accounts.apps.AccountsConfig",
+        "notifications.apps.NotificationsConfig",
     ]
+
+    # Собственная модель пользователя. Менять AUTH_USER_MODEL после
+    # появления данных практически невозможно — поэтому она заведена
+    # сразу, до первой миграции.
+    AUTH_USER_MODEL = "accounts.User"
+
+    # Один бэкенд вместо стандартного ModelBackend: вход по логину ИЛИ
+    # по адресу почты, с выравниванием времени ответа.
+    AUTHENTICATION_BACKENDS = ["accounts.backends.EmailOrUsernameBackend"]
     MIDDLEWARE = [
         "django.middleware.security.SecurityMiddleware",
         "django.contrib.sessions.middleware.SessionMiddleware",
@@ -418,5 +460,105 @@ LOGGING = {
             "level": "WARNING",
             "propagate": False,
         },
+    },
+}
+
+
+# =============================================================================
+#  Криптографические ключи
+# =============================================================================
+#  Разбираются на старте, чтобы ошибка в конфигурации обнаружилась при
+#  запуске контейнера, а не при первой попытке регистрации.
+
+from selectashop import crypto as _crypto  # noqa: E402
+
+if DB_AVAILABLE:
+    try:
+        DATA_ENCRYPTION_KEY = _crypto.decode_key(
+            _sec.get("data_encryption_key", ""), name="data_encryption_key"
+        )
+        BLIND_INDEX_PEPPER = _crypto.decode_key(
+            _sec.get("blind_index_pepper", ""), name="blind_index_pepper"
+        )
+        TOKEN_PEPPER = _crypto.decode_key(
+            _sec.get("token_pepper", ""), name="token_pepper"
+        )
+    except ValueError as exc:
+        raise ImproperlyConfigured(
+            f"{exc}\nСгенерируйте ключи заново: make init-config"
+        ) from exc
+
+    if len({DATA_ENCRYPTION_KEY, BLIND_INDEX_PEPPER, TOKEN_PEPPER}) != 3:
+        raise ImproperlyConfigured(
+            "Ключи в [security] совпадают между собой. Они должны быть "
+            "разными: компрометация одного не должна раскрывать остальные."
+        )
+
+    ENCRYPTION_KEY_VERSION = int(_sec.get("encryption_key_version", 1))
+else:
+    DATA_ENCRYPTION_KEY = BLIND_INDEX_PEPPER = TOKEN_PEPPER = b""
+    ENCRYPTION_KEY_VERSION = 1
+
+
+# =============================================================================
+#  Учётные записи
+# =============================================================================
+
+_accounts = CONFIG.get("accounts", {})
+
+ACCOUNTS = {
+    "unverified_email_ttl_hours": int(_accounts.get("unverified_email_ttl_hours", 24)),
+    "email_verify_token_ttl_hours": int(_accounts.get("email_verify_token_ttl_hours", 24)),
+    "password_reset_token_ttl_hours": int(_accounts.get("password_reset_token_ttl_hours", 2)),
+    "username_min_length": int(_accounts.get("username_min_length", 4)),
+    "username_max_length": int(_accounts.get("username_max_length", 32)),
+    "reserved_usernames": tuple(_accounts.get("reserved_usernames", ())),
+    "blocked_email_domains": tuple(_accounts.get("blocked_email_domains", ())),
+    "password_min_length": int(_accounts.get("password_min_length", 10)),
+    "max_emails_per_address_per_hour": int(_accounts.get("max_emails_per_address_per_hour", 3)),
+    "max_registrations_per_ip_per_hour": int(_accounts.get("max_registrations_per_ip_per_hour", 5)),
+    "max_login_failures": int(_accounts.get("max_login_failures", 10)),
+    "login_lockout_minutes": int(_accounts.get("login_lockout_minutes", 15)),
+    "security_event_retention_days": int(_accounts.get("security_event_retention_days", 90)),
+}
+
+# Минимальная длина пароля берётся из того же конфига, чтобы значение
+# не задваивалось между валидатором Django и формой регистрации.
+for _validator in AUTH_PASSWORD_VALIDATORS:
+    if _validator["NAME"].endswith("MinimumLengthValidator"):
+        _validator["OPTIONS"] = {"min_length": ACCOUNTS["password_min_length"]}
+
+
+# =============================================================================
+#  Юридические документы
+# =============================================================================
+#  Тексты лежат файлами и версионируются git. В базе хранится ключ,
+#  версия и SHA-256 текста на момент согласия.
+
+_legal = CONFIG.get("legal", {})
+
+# В репозитории документы лежат рядом с src/, в образе — внутри /app.
+# Проверяем оба расположения, чтобы один и тот же код работал и при
+# локальном запуске, и в контейнере.
+_legal_dir_name = _legal.get("documents_dir", "legal")
+LEGAL_DOCUMENTS_DIR = next(
+    (
+        candidate
+        for candidate in (BASE_DIR / _legal_dir_name, BASE_DIR.parent / _legal_dir_name)
+        if candidate.is_dir()
+    ),
+    BASE_DIR.parent / _legal_dir_name,
+)
+
+LEGAL_DOCUMENTS = {
+    "pdn_consent": {
+        "version": str(_legal.get("pdn_consent_version", "1.0")),
+        "filename": "pdn_consent.md",
+        "title": "Согласие на обработку персональных данных",
+    },
+    "terms_of_service": {
+        "version": str(_legal.get("terms_version", "1.0")),
+        "filename": "terms_of_service.md",
+        "title": "Пользовательское соглашение",
     },
 }

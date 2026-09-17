@@ -31,7 +31,8 @@ endif
 COMPOSE := docker compose --env-file $(ENV_FILE) $(COMPOSE_FILES)
 
 .PHONY: help init-config secret config build up down restart logs ps \
-        tls-selfsigned audit audit-django audit-python audit-deps audit-nginx \
+        tls-selfsigned db-cert audit audit-django audit-python audit-deps \
+        audit-nginx migrate create-owner grant-role purge psql \
         shell check clean
 
 help:
@@ -43,6 +44,7 @@ help:
 	@echo '    make secret           напечатать новый SECRET_KEY'
 	@echo '    make config           сгенерировать конфиги из единого файла'
 	@echo '    make tls-selfsigned   самоподписанный сертификат для работы по IP'
+	@echo '    make db-cert          сертификат для канала приложение <-> БД'
 	@echo ''
 	@echo '  Запуск'
 	@echo '    make build            собрать образ приложения'
@@ -51,6 +53,13 @@ help:
 	@echo '    make restart          перезапустить оба сервиса вместе'
 	@echo '    make logs             смотреть логи'
 	@echo '    make ps               состояние контейнеров'
+	@echo ''
+	@echo '  База данных'
+	@echo '    make migrate          применить миграции (ролью-владельцем)'
+	@echo '    make create-owner     создать владельца магазина'
+	@echo '    make grant-role       сменить роль: ARGS="логин admin"'
+	@echo '    make purge            удалить просроченные регистрации и старые события'
+	@echo '    make psql             консоль psql под ролью приложения'
 	@echo ''
 	@echo '  Безопасность'
 	@echo '    make audit            все проверки разом'
@@ -75,6 +84,9 @@ config:
 
 tls-selfsigned:
 	@sh scripts/gen_selfsigned_cert.sh
+
+db-cert:
+	@sh scripts/gen_db_cert.sh
 
 # -----------------------------------------------------------------------------
 #  Запуск
@@ -109,6 +121,28 @@ ps:
 
 shell:
 	$(COMPOSE) exec web /bin/sh
+
+# -----------------------------------------------------------------------------
+#  База данных
+# -----------------------------------------------------------------------------
+#  Миграции идут ролью-владельцем схемы: у роли приложения нет прав DDL,
+#  и это намеренно.
+
+migrate: $(ENV_FILE)
+	$(COMPOSE) exec web python manage.py migrate --database=admin
+
+create-owner: $(ENV_FILE)
+	$(COMPOSE) exec web python manage.py create_owner $(ARGS)
+
+grant-role: $(ENV_FILE)
+	$(COMPOSE) exec web python manage.py grant_role $(ARGS)
+
+purge: $(ENV_FILE)
+	$(COMPOSE) exec web python manage.py purge_expired
+
+psql: $(ENV_FILE)
+	@$(COMPOSE) exec db psql \
+	    "host=/var/run/postgresql dbname=$$(grep '^DB_NAME=' $(ENV_FILE) | cut -d= -f2-) user=$$(grep '^DB_APP_USER=' $(ENV_FILE) | cut -d= -f2-)"
 
 # -----------------------------------------------------------------------------
 #  Аудит безопасности

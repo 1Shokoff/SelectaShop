@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import re
 import shutil
@@ -118,12 +119,63 @@ def validate(cfg: dict) -> list[str]:
     engine = get(cfg, "database", "engine", "none")
     if engine not in {"none", "sqlite", "postgresql"}:
         raise ConfigError(f"[database].engine = {engine!r}; ожидается none|sqlite|postgresql")
-    if engine == "postgresql" and not get(cfg, "database", "password", ""):
-        raise ConfigError("[database].engine = postgresql, но пароль пуст")
     if engine == "sqlite":
         warnings.append("[database].engine = sqlite — не для продакшена.")
 
-    for name in ("edge_subnet", "internal_subnet"):
+    if engine == "postgresql":
+        db = cfg["database"]
+        for key in ("app_password", "owner_password", "backup_password", "superuser_password"):
+            if not db.get(key):
+                raise ConfigError(
+                    f"[database].{key} пуст. Сгенерируйте пароли: make init-config"
+                )
+        passwords = [db[k] for k in
+                     ("app_password", "owner_password", "backup_password", "superuser_password")]
+        if len(set(passwords)) != len(passwords):
+            raise ConfigError(
+                "Пароли ролей БД совпадают между собой. Смысл разделения ролей "
+                "в том, что компрометация одной не даёт прав другой."
+            )
+
+        # Криптографические ключи. Проверяются здесь, а не только при старте
+        # Django: ошибка должна обнаружиться до запуска контейнеров.
+        sec = cfg.get("security", {})
+        keys = {}
+        for name in ("data_encryption_key", "blind_index_pepper", "token_pepper"):
+            value = sec.get(name, "")
+            if not value:
+                raise ConfigError(
+                    f"[security].{name} пуст. Сгенерируйте: make init-config"
+                )
+            try:
+                raw = base64.b64decode(value, validate=True)
+            except Exception as exc:
+                raise ConfigError(f"[security].{name} не является корректным base64") from exc
+            if len(raw) != 32:
+                raise ConfigError(
+                    f"[security].{name}: ожидается 32 байта, получено {len(raw)}"
+                )
+            keys[name] = raw
+        if len(set(keys.values())) != 3:
+            raise ConfigError(
+                "Криптографические ключи в [security] совпадают между собой. "
+                "Они должны быть разными: компрометация перца для поиска не "
+                "должна позволять расшифровать данные."
+            )
+
+        if db.get("tls_enabled", False):
+            key_path = ROOT / "deploy" / "generated" / "certs" / "db" / "server.key"
+            if not key_path.exists():
+                raise ConfigError(
+                    "[database].tls_enabled = true, но сертификат БД не создан.\n"
+                    "  выполните:  make db-cert"
+                )
+        else:
+            warnings.append(
+                "[database].tls_enabled = false — канал до БД не шифруется."
+            )
+
+    for name in ("edge_subnet", "internal_subnet", "data_subnet"):
         value = get(cfg, "network", name)
         try:
             ipaddress.ip_network(value)
@@ -377,6 +429,37 @@ def build_nginx_values(cfg: dict) -> dict[str, str]:
 # .env для docker compose
 # --------------------------------------------------------------------------
 
+def build_pg_hba(cfg: dict) -> str:
+    """Правила доступа к PostgreSQL.
+
+    Порядок строк важен: PostgreSQL применяет первое подходящее правило.
+    """
+    db = cfg["database"]
+    subnet = cfg["network"]["data_subnet"]
+    host_type = "hostssl" if db.get("tls_enabled", False) else "host"
+
+    return f"""# СГЕНЕРИРОВАНО scripts/render_config.py — НЕ РЕДАКТИРОВАТЬ.
+# Правьте config/selectashop.toml и выполняйте: make config
+#
+# TYPE  DATABASE  USER  ADDRESS  METHOD
+
+# Локальный сокет внутри контейнера. Нужен служебным скриптам образа при
+# первичной инициализации и проверке живости (pg_isready). Доверие здесь
+# ничего не ослабляет: единственный процесс в контейнере — сам PostgreSQL,
+# и тот, кто получил в нём выполнение кода, уже работает от его имени.
+local   all       all                           trust
+
+# Единственный сетевой доступ — из внутренней сети data, где находятся
+# только приложение и воркер рассылки. {"Обязательно по TLS." if host_type == "hostssl" else "БЕЗ шифрования канала."}
+{host_type:<8}all       all   {subnet:<18}scram-sha-256
+
+# Всё остальное отвергается явно. Строка избыточна — по умолчанию
+# PostgreSQL и так отказывает, — но делает намерение видимым.
+host    all       all   0.0.0.0/0             reject
+host    all       all   ::/0                  reject
+"""
+
+
 def build_env(cfg: dict) -> str:
     project = cfg["project"]
     net = cfg["network"]
@@ -401,6 +484,36 @@ def build_env(cfg: dict) -> str:
         "TMPFS_SIZE": lim["tmpfs_size"],
         "TLS_ENABLED": str(cfg["tls"].get("enabled", False)).lower(),
     }
+
+    db = cfg.get("database", {})
+    if db.get("engine") == "postgresql":
+        tuning = db.get("tuning", {})
+        pairs.update({
+            "POSTGRES_IMAGE": registry + project.get("postgres_image", "postgres:16-bookworm"),
+            "DATA_SUBNET": net["data_subnet"],
+            "DB_NAME": db["name"],
+            "DB_SUPERUSER": db["superuser"],
+            "DB_SUPERUSER_PASSWORD": db["superuser_password"],
+            "DB_OWNER_USER": db["owner_user"],
+            "DB_OWNER_PASSWORD": db["owner_password"],
+            "DB_APP_USER": db["app_user"],
+            "DB_APP_PASSWORD": db["app_password"],
+            "DB_BACKUP_USER": db["backup_user"],
+            "DB_BACKUP_PASSWORD": db["backup_password"],
+            "PG_SSL": "on" if db.get("tls_enabled") else "off",
+            "PG_SHARED_BUFFERS": tuning.get("shared_buffers", "128MB"),
+            "PG_EFFECTIVE_CACHE_SIZE": tuning.get("effective_cache_size", "256MB"),
+            "PG_WORK_MEM": tuning.get("work_mem", "4MB"),
+            "PG_MAINTENANCE_WORK_MEM": tuning.get("maintenance_work_mem", "64MB"),
+            "PG_WAL_BUFFERS": tuning.get("wal_buffers", "4MB"),
+            "PG_MAX_CONNECTIONS": tuning.get("max_connections", 20),
+            "PG_CHECKPOINT_COMPLETION_TARGET": tuning.get("checkpoint_completion_target", 0.9),
+            "PG_RANDOM_PAGE_COST": tuning.get("random_page_cost", 1.1),
+            "PG_LOG_MIN_DURATION": tuning.get("log_min_duration_statement", 500),
+            "DB_MEMORY": lim.get("db_memory", "320m"),
+            "DB_CPUS": lim.get("db_cpus", "0.60"),
+            "DB_PIDS": lim.get("db_pids", 128),
+        })
     header = (
         "# СГЕНЕРИРОВАНО scripts/render_config.py — НЕ РЕДАКТИРОВАТЬ.\n"
         "# Правьте config/selectashop.toml и выполняйте: make config\n"
@@ -469,6 +582,9 @@ def main() -> int:
         + "\n",
     )
 
+    if cfg.get("database", {}).get("engine") == "postgresql":
+        write(OUT_DIR / "pg_hba.conf", build_pg_hba(cfg))
+
     template = TEMPLATE.read_text(encoding="utf-8")
     nginx_conf = render_template(template, build_nginx_values(cfg))
     write(OUT_DIR / "nginx.conf", nginx_conf)
@@ -497,6 +613,8 @@ def main() -> int:
         ".env",
     ):
         print(f"    deploy/generated/{name}")
+    if (OUT_DIR / "pg_hba.conf").exists():
+        print("    deploy/generated/pg_hba.conf")
     if tls_path.exists():
         print("    deploy/generated/docker-compose.tls.yml")
     if egress_path.exists():
