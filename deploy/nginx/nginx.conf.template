@@ -1,0 +1,132 @@
+# =============================================================================
+#  ШАБЛОН конфигурации nginx для SelectaShop
+# =============================================================================
+#  Не редактируйте deploy/generated/nginx.conf — он перезаписывается.
+#  Значения {{ ... }} подставляются из config/selectashop.toml
+#  скриптом scripts/render_config.py.
+# =============================================================================
+
+# Директива user намеренно отсутствует: контейнер работает от непривилегированного
+# пользователя nginx (uid 101), а указание user при запуске не от root вызывает
+# предупреждение и ничего не меняет.
+
+worker_processes {{ worker_processes }};
+
+# Минимум вдвое больше worker_connections: под нагрузкой на каждое
+# клиентское соединение приходится второе — к приложению.
+worker_rlimit_nofile {{ worker_rlimit_nofile }};
+
+# PID и временные файлы — в tmpfs: корневая ФС контейнера смонтирована
+# только для чтения (read_only: true в docker-compose.yml).
+pid /tmp/nginx.pid;
+
+# Логи уходят в stderr/stdout, их забирает docker. Файлов на диске нет —
+# на VPS с 1 GB переполнение диска логами это реальный сценарий отказа.
+error_log /dev/stderr warn;
+
+events {
+    worker_connections {{ worker_connections }};
+    multi_accept       off;
+}
+
+http {
+    include      /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    charset      utf-8;
+
+    # Скрыть версию nginx в заголовке Server и на страницах ошибок.
+    # Версия — это подсказка атакующему, какие CVE пробовать.
+    server_tokens {{ server_tokens }};
+
+    client_body_temp_path /tmp/nginx-client;
+    proxy_temp_path       /tmp/nginx-proxy;
+    fastcgi_temp_path     /tmp/nginx-fastcgi;
+    uwsgi_temp_path       /tmp/nginx-uwsgi;
+    scgi_temp_path        /tmp/nginx-scgi;
+
+    # -------------------------------------------------------------------------
+    #  Логирование
+    # -------------------------------------------------------------------------
+    #  $remote_addr здесь — реальный адрес клиента, потому что nginx стоит
+    #  на границе. Заголовок X-Forwarded-For от клиента НЕ используется:
+    #  он подделывается тривиально.
+    log_format main '$remote_addr - $remote_user [$time_local] '
+                    '"$request" $status $body_bytes_sent '
+                    '"$http_referer" "$http_user_agent" '
+                    'rt=$request_time urt=$upstream_response_time';
+
+    access_log {{ access_log_state }};
+
+    # -------------------------------------------------------------------------
+    #  Передача данных
+    # -------------------------------------------------------------------------
+    sendfile     on;
+    tcp_nopush   on;
+    tcp_nodelay  on;
+
+    keepalive_timeout  {{ keepalive_timeout }};
+    keepalive_requests {{ keepalive_requests }};
+
+    # -------------------------------------------------------------------------
+    #  Защита от медленных и раздутых запросов
+    # -------------------------------------------------------------------------
+    #  Ограничения ниже закрывают Slowloris: клиент, растягивающий отправку
+    #  заголовков или тела, отключается по таймауту и не держит воркер.
+    client_max_body_size        {{ client_max_body_size }};
+    client_body_timeout         {{ client_body_timeout }};
+    client_header_timeout       {{ client_header_timeout }};
+    send_timeout                {{ send_timeout }};
+    client_body_buffer_size     16k;
+    client_header_buffer_size   1k;
+    large_client_header_buffers 4 8k;
+
+    # -------------------------------------------------------------------------
+    #  Зоны ограничения частоты запросов
+    # -------------------------------------------------------------------------
+    #  Ключ $binary_remote_addr занимает 4 байта против 7-15 у текстового
+    #  $remote_addr — на 1 GB RAM это не мелочь.
+    #
+    #  general — обычный просмотр каталога
+    #  auth    — формы входа и регистрации (главная защита от перебора)
+    #  admin   — административный раздел
+    #  perip   — одновременные соединения с одного адреса
+    limit_req_zone  $binary_remote_addr zone=general:{{ limit_zone_size }} rate={{ rate_limit_general }};
+    limit_req_zone  $binary_remote_addr zone=auth:{{ limit_zone_size }}    rate={{ rate_limit_auth }};
+    limit_req_zone  $binary_remote_addr zone=admin:{{ limit_zone_size }}   rate={{ rate_limit_admin }};
+    limit_conn_zone $binary_remote_addr zone=perip:{{ limit_zone_size }};
+
+    # 429 вместо стандартного 503: честный код и меньше поводов для ретраев.
+    limit_req_status  429;
+    limit_conn_status 429;
+
+    # -------------------------------------------------------------------------
+    #  Сжатие
+    # -------------------------------------------------------------------------
+    #  gzip_proxied выключен для ответов с cookie: сжатие ответа, содержащего
+    #  одновременно секрет и данные под контролем атакующего, открывает
+    #  атаку BREACH. Статика без cookie сжимается безопасно.
+    gzip              on;
+    gzip_vary         on;
+    gzip_proxied      no-cache no-store private expired auth;
+    gzip_comp_level   5;
+    gzip_min_length   512;
+    gzip_types        text/plain text/css text/xml application/json
+                      application/javascript application/xml+rss
+                      image/svg+xml;
+    gzip_disable      "msie6";
+
+    # -------------------------------------------------------------------------
+    #  Апстрим приложения
+    # -------------------------------------------------------------------------
+    #  Имя web резолвится встроенным DNS docker во внутренней сети.
+    #  Порт 8000 не публикуется на хосте: снаружи он недостижим.
+    upstream app {
+        server web:8000 max_fails=3 fail_timeout=10s;
+        keepalive 8;
+    }
+
+    # -------------------------------------------------------------------------
+    #  Сервера
+    # -------------------------------------------------------------------------
+{{ servers }}
+}
