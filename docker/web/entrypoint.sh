@@ -9,7 +9,13 @@ CONFIG="${SELECTASHOP_CONFIG:-/etc/selectashop/selectashop.toml}"
 
 if [ ! -r "$CONFIG" ]; then
     echo "entrypoint: файл конфигурации $CONFIG недоступен для чтения" >&2
-    echo "entrypoint: смонтирован ли config/selectashop.toml в контейнер?" >&2
+    echo "entrypoint: приложение работает от uid $(id -u)" >&2
+    echo "entrypoint:" >&2
+    echo "entrypoint: чаще всего причина в правах: файл создаётся с 0600," >&2
+    echo "entrypoint: а этому пользователю нужен доступ на чтение." >&2
+    echo "entrypoint: на хосте выполните:  make config" >&2
+    echo "entrypoint: либо вручную:  chgrp $(id -g) config/selectashop.toml" >&2
+    echo "entrypoint:                chmod 0640 config/selectashop.toml" >&2
     exit 78   # EX_CONFIG
 fi
 

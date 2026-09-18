@@ -85,6 +85,7 @@ secret:
 
 config:
 	@python3 scripts/render_config.py
+	@sh scripts/fix_config_perms.sh
 
 tls-selfsigned:
 	@sh scripts/gen_selfsigned_cert.sh
@@ -100,6 +101,7 @@ db-cert:
 
 $(ENV_FILE):
 	@python3 scripts/render_config.py
+	@sh scripts/fix_config_perms.sh
 
 build: $(ENV_FILE)
 	$(COMPOSE) build
