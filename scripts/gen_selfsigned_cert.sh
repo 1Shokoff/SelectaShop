@@ -26,18 +26,38 @@ if [ ! -r "$CONFIG" ]; then
     exit 78
 fi
 
-# IP берём из единственного конфига, чтобы он не разъехался с nginx.
+# Адреса берём из единственного конфига, чтобы они не разъехались с nginx.
 SERVER_IP="$(python3 -c "
 import tomllib
 with open('$CONFIG','rb') as fh:
     print(tomllib.load(fh)['network']['server_ip'])
 ")"
 
+# В SAN попадает и IP, и все имена из extra_allowed_hosts.
+#
+# Имена здесь не роскошь. Браузер, обращаясь к голому IP-адресу, НЕ
+# отправляет SNI — стандарт прямо запрещает писать туда IP. Соединение
+# без SNI выглядит нетипично: его отбрасывает часть фильтрующего
+# оборудования, и в браузере это выглядит как обрыв рукопожатия.
+#
+# Достаточно любого имени, даже прописанного только в hosts на своей
+# машине: браузер начнёт отправлять SNI. Тот же механизм пригодится и
+# при переходе на настоящий домен — его тоже достаточно вписать в
+# extra_allowed_hosts.
+SAN="$(python3 -c "
+import tomllib
+with open('$CONFIG','rb') as fh:
+    net = tomllib.load(fh)['network']
+parts = ['IP:' + net['server_ip']]
+parts += ['DNS:' + h for h in net.get('extra_allowed_hosts', []) if h]
+print(','.join(parts))
+")"
+
 prepare_cert_dir "$CERT_DIR"
 
-# subjectAltName с IP обязателен: браузеры давно игнорируют CN.
+# subjectAltName обязателен: браузеры давно игнорируют CN.
 # Без SAN сертификат не примет ни один современный клиент.
-issue_certificate "$CERT_DIR" "$SERVER_IP" "IP:$SERVER_IP" 825
+issue_certificate "$CERT_DIR" "$SERVER_IP" "$SAN" 825
 
 # Сертификат не секретен, его читают все.
 chmod 0644 "$CERT_DIR/server.crt"
@@ -46,7 +66,8 @@ chmod 0644 "$CERT_DIR/server.crt"
 # приватный ключ были бы ошибкой — его прочитал бы любой пользователь хоста.
 secure_private_key "$CERT_DIR/server.key" 0 "$NGINX_UID" 0640 "nginx"
 
-echo "  сертификат сайта создан: deploy/generated/certs/ (CN=$SERVER_IP, 825 дней)"
+echo "  сертификат сайта создан: deploy/generated/certs/ (825 дней)"
+echo "  имена в сертификате: $SAN"
 echo "  ключ: владелец root:$NGINX_UID, права 0640"
 echo
 echo "  ДАЛЬШЕ: в config/selectashop.toml установите [tls].enabled = true,"
