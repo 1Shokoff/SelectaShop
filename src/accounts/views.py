@@ -14,7 +14,11 @@ from django.db import IntegrityError, transaction
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
-from django.views.decorators.http import require_http_methods, require_POST
+from django.views.decorators.http import (
+    require_http_methods,
+    require_POST,
+    require_safe,
+)
 
 from notifications.service import RateLimited, enqueue
 from selectashop import crypto
@@ -39,7 +43,11 @@ logger = logging.getLogger(__name__)
 #  Регистрация
 # =============================================================================
 
-@require_http_methods(["GET", "POST"])
+# HEAD присутствует во всех списках рядом с GET намеренно. По стандарту
+# HEAD обязан работать везде, где работает GET: им пользуются системы
+# мониторинга, проверки ссылок и часть поисковых роботов. Без него они
+# получают 405 на каждой странице сайта.
+@require_http_methods(["GET", "HEAD", "POST"])
 def register(request: HttpRequest) -> HttpResponse:
     if request.user.is_authenticated:
         return redirect("accounts:profile")
@@ -180,7 +188,7 @@ def _enqueue_quietly(**kwargs) -> None:
 #  Подтверждение адреса
 # =============================================================================
 
-@require_http_methods(["GET", "POST"])
+@require_http_methods(["GET", "HEAD", "POST"])
 def verify(request: HttpRequest, token: str) -> HttpResponse:
     """Подтверждение почты по ссылке из письма.
 
@@ -239,7 +247,7 @@ def _find_token(token: str, purpose: str):
 #  Вход и выход
 # =============================================================================
 
-@require_http_methods(["GET", "POST"])
+@require_http_methods(["GET", "HEAD", "POST"])
 def login(request: HttpRequest) -> HttpResponse:
     if request.user.is_authenticated:
         return redirect("accounts:profile")
@@ -303,7 +311,7 @@ def logout(request: HttpRequest) -> HttpResponse:
 #  Восстановление доступа
 # =============================================================================
 
-@require_http_methods(["GET", "POST"])
+@require_http_methods(["GET", "HEAD", "POST"])
 def password_reset_request(request: HttpRequest) -> HttpResponse:
     form = PasswordResetRequestForm(request.POST or None)
 
@@ -347,7 +355,7 @@ def _send_reset_if_exists(request: HttpRequest, address: str) -> None:
     )
 
 
-@require_http_methods(["GET", "POST"])
+@require_http_methods(["GET", "HEAD", "POST"])
 def password_reset_confirm(request: HttpRequest, token: str) -> HttpResponse:
     record = _find_token(token, TokenPurpose.PASSWORD_RESET)
 
@@ -406,7 +414,7 @@ def password_reset_confirm(request: HttpRequest, token: str) -> HttpResponse:
 # =============================================================================
 
 @login_required
-@require_http_methods(["GET"])
+@require_safe
 def profile(request: HttpRequest) -> HttpResponse:
     user_email = request.user.primary_email
     return render(
